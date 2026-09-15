@@ -1,85 +1,115 @@
-import express from 'express';
-import http from 'http';
-import { Server } from 'socket.io';
-import crypto from 'crypto';
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
-const rooms = new Map();
 
 const PORT = process.env.PORT || 10000;
 
-app.use(express.static('public'));
+app.use(express.static("public"));
+
+const rooms = new Map();
 
 const RANKS = [
-  'A', '2', '3', '4', '5', '6', '7',
-  '8', '9', '10', 'J', 'Q', 'K'
+  "A",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6",
+  "7",
+  "8",
+  "9",
+  "10",
+  "J",
+  "Q",
+  "K"
 ];
 
-const SUITS = ['♠', '♥', '♦', '♣'];
+const SUITS = ["♠", "♥", "♦", "♣"];
 
-function createRoomCode() {
-  let roomCode;
+const MAX_PLAYERS = 10;
+const MIN_PLAYERS = 2;
 
-  do {
-    roomCode = crypto
-      .randomBytes(3)
-      .toString('hex')
-      .toUpperCase();
-  } while (rooms.has(roomCode));
-
-  return roomCode;
-}
-
-function createDeck() {
-  return SUITS
-    .flatMap(suit =>
-      RANKS.map(rank => ({
-        id: crypto.randomUUID(),
-        r: rank,
-        s: suit
-      }))
-    )
-    .sort(() => Math.random() - 0.5);
-}
-
-function nextPlayer(room, currentIndex) {
-  for (let n = 1; n <= room.players.length; n++) {
-    const index =
-      (currentIndex + n) % room.players.length;
-
-    if (room.players[index]?.hand.length > 0) {
-      return index;
-    }
-  }
-
-  return -1;
-}
-
-function checkFourOfAKind(player) {
-  const removedRanks = [];
+function makeDeck() {
+  const deck = [];
 
   for (const rank of RANKS) {
-    const matchingCards =
-      player.hand.filter(card => card.r === rank);
-
-    if (matchingCards.length === 4) {
-      player.hand = player.hand.filter(
-        card => card.r !== rank
-      );
-
-      player.removed += 4;
-      removedRanks.push(rank);
+    for (const suit of SUITS) {
+      deck.push({
+        id: `${rank}-${suit}-${Math.random().toString(36).slice(2, 8)}`,
+        rank,
+        suit
+      });
     }
   }
 
-  return removedRanks;
+  return deck;
 }
 
-function getState(room, socketId) {
-  const player =
-    room.players.find(p => p.id === socketId);
+function shuffle(array) {
+  const arr = [...array];
+
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+
+  return arr;
+}
+
+function createRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  let code;
+
+  do {
+    code = "";
+
+    for (let i = 0; i < 6; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+  } while (rooms.has(code));
+
+  return code;
+}
+
+function playerIndex(room, socketId) {
+  return room.players.findIndex(p => p.id === socketId);
+}
+
+function getPlayer(room, socketId) {
+  return room.players.find(p => p.id === socketId);
+}
+
+function currentPlayer(room) {
+  return room.players[room.current];
+}
+
+function nextIndex(room, index) {
+  if (!room.players.length) return 0;
+
+  return (index + 1) % room.players.length;
+}
+
+function cleanName(name) {
+  return String(name || "Player")
+    .trim()
+    .replace(/[<>]/g, "")
+    .slice(0, 20) || "Player";
+}
+
+function cleanMessage(message) {
+  return String(message || "")
+    .trim()
+    .replace(/[<>]/g, "")
+    .slice(0, 250);
+}
+
+function buildPublicState(room, socketId) {
+  const me = getPlayer(room, socketId);
 
   return {
     code: room.code,
@@ -92,74 +122,75 @@ function getState(room, socketId) {
 
     current: room.current,
 
-    targetRank: room.targetRank,
+    currentPlayerId:
+      room.players[room.current]?.id || null,
 
-    declaration: room.declaration
-      ? {
-          player: room.declaration.player,
-          count: room.declaration.count,
-          rank: room.declaration.rank
-        }
-      : null,
+    targetRank: room.targetRank,
 
     pileCount: room.pile.length,
 
-    players: room.players.map(p => ({
-      id: p.id,
-      name: p.name,
-      handCount: p.hand.length,
-      removed: p.removed
-    })),
-
-    me: player
+    declaration: room.declaration
       ? {
-          id: player.id,
-          name: player.name,
-          hand: player.hand
-        }
-      : null,
-
-    /*
-     * REVEAL SYSTEM
-     *
-     * This contains the cards that were flipped face-up
-     * and the result of the declaration.
-     *
-     * result = "TRUTH" or "LIE"
-     */
-    reveal: room.reveal
-      ? {
-          result: room.reveal.result,
-
-          cards: room.reveal.cards,
-
-          declarer: room.reveal.declarer,
-
-          challenger: room.reveal.challenger,
-
-          rank: room.reveal.rank,
-
-          count: room.reveal.count
+          declarer: room.declaration.declarer,
+          rank: room.declaration.rank,
+          count: room.declaration.count
         }
       : null,
 
     winner: room.winner,
 
-    message: room.message
+    message: room.message,
+
+    reveal: room.reveal,
+
+    players: room.players.map((p, index) => ({
+      id: p.id,
+      name: p.name,
+      handCount: p.hand.length,
+      removed: p.removed,
+      isHost: p.id === room.host,
+      isCurrent: index === room.current
+    })),
+
+    hand: me
+      ? me.hand
+      : [],
+
+    myId: socketId
   };
 }
 
 function sendState(room) {
-  room.players.forEach(player => {
+  for (const player of room.players) {
     io.to(player.id).emit(
-      'state',
-      getState(room, player.id)
+      "state",
+      buildPublicState(room, player.id)
     );
-  });
+  }
+}
+
+function sendError(socket, message) {
+  socket.emit("errorMessage", message);
+}
+
+function resetReveal(room) {
+  room.reveal = null;
 }
 
 function startGame(room) {
-  const deck = createDeck();
+  if (room.players.length < MIN_PLAYERS) {
+    return;
+  }
+
+  const deck = shuffle(makeDeck());
+
+  room.started = true;
+  room.phase = "play";
+  room.winner = null;
+  room.pile = [];
+  room.declaration = null;
+  room.targetRank = null;
+  room.reveal = null;
 
   room.players.forEach(player => {
     player.hand = [];
@@ -167,359 +198,268 @@ function startGame(room) {
   });
 
   /*
-   * Deal clockwise.
-   */
+    Deal cards clockwise / round-robin.
+    This distributes the 52-card deck among all players.
+  */
+
   deck.forEach((card, index) => {
-    room.players[
-      index % room.players.length
-    ].hand.push(card);
+    const player =
+      room.players[index % room.players.length];
+
+    player.hand.push(card);
   });
 
-  /*
-   * Remove four-of-a-kind already present.
-   */
-  room.players.forEach(player => {
-    checkFourOfAKind(player);
-  });
+  room.current = Math.floor(
+    Math.random() * room.players.length
+  );
 
-  room.current =
-    Math.floor(
-      Math.random() * room.players.length
-    );
-
-  room.started = true;
-
-  room.phase = 'play';
-
-  room.pile = [];
-
-  room.targetRank = null;
-
-  room.declaration = null;
-
-  room.reveal = null;
-
-  room.winner = null;
+  const first = currentPlayer(room);
 
   room.message =
-    `${room.players[room.current].name} is the first player.`;
+    `${first.name} goes first. Choose one or more cards.`;
 
   sendState(room);
 }
 
-function throwCards(room, socketId, ids, rank) {
-  const playerIndex =
-    room.players.findIndex(
-      player => player.id === socketId
+function checkFourOfKind(player) {
+  const counts = {};
+
+  for (const card of player.hand) {
+    counts[card.rank] =
+      (counts[card.rank] || 0) + 1;
+  }
+
+  let removedAny = false;
+
+  for (const rank of RANKS) {
+    if (counts[rank] === 4) {
+      const removed = player.hand.filter(
+        card => card.rank === rank
+      );
+
+      player.hand = player.hand.filter(
+        card => card.rank !== rank
+      );
+
+      player.removed += 4;
+
+      removedAny = true;
+
+      console.log(
+        `${player.name} removed four ${rank}s from the game.`
+      );
+    }
+  }
+
+  return removedAny;
+}
+
+function checkWinner(room) {
+  const winner = room.players.find(
+    player => player.hand.length === 0
+  );
+
+  if (!winner) {
+    return false;
+  }
+
+  room.winner = winner.id;
+  room.phase = "finished";
+
+  room.message =
+    `${winner.name} has won Bakakay!`;
+
+  return true;
+}
+
+function throwCards(room, socketId, cardIds, rank) {
+  if (!room.started) {
+    return;
+  }
+
+  if (room.phase !== "play") {
+    return;
+  }
+
+  const player = getPlayer(room, socketId);
+
+  if (!player) {
+    return;
+  }
+
+  if (currentPlayer(room)?.id !== socketId) {
+    sendError(socketId, "It is not your turn.");
+    return;
+  }
+
+  if (!Array.isArray(cardIds)) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      "Invalid cards."
+    );
+    return;
+  }
+
+  if (
+    cardIds.length < 1 ||
+    cardIds.length > player.hand.length
+  ) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      "Choose at least one card."
+    );
+    return;
+  }
+
+  rank = String(rank || "").trim();
+
+  if (!RANKS.includes(rank)) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      "Invalid rank."
+    );
+    return;
+  }
+
+  const uniqueIds = [...new Set(cardIds)];
+
+  if (uniqueIds.length !== cardIds.length) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      "Invalid card selection."
+    );
+    return;
+  }
+
+  const selected = [];
+
+  for (const id of uniqueIds) {
+    const card = player.hand.find(
+      c => c.id === id
     );
 
-  if (
-    playerIndex < 0 ||
-    playerIndex !== room.current ||
-    room.phase !== 'play'
-  ) {
-    return;
-  }
+    if (!card) {
+      sendError(
+        io.sockets.sockets.get(socketId),
+        "One or more selected cards are invalid."
+      );
+      return;
+    }
 
-  const player =
-    room.players[playerIndex];
-
-  if (
-    !Array.isArray(ids) ||
-    ids.length === 0 ||
-    ids.length > player.hand.length
-  ) {
-    return;
+    selected.push(card);
   }
 
   /*
-   * The same rank must be used after
-   * a successful TRUTH challenge.
-   */
-  if (
-    room.targetRank &&
-    rank !== room.targetRank
-  ) {
-    return;
-  }
+    Remove cards from player's hand.
+  */
 
-  const selectedCards =
-    player.hand.filter(card =>
-      ids.includes(card.id)
-    );
-
-  /*
-   * Make sure all selected cards
-   * actually belong to the player.
-   */
-  if (
-    selectedCards.length !== ids.length
-  ) {
-    return;
-  }
-
-  /*
-   * Remove selected cards from hand.
-   */
   player.hand = player.hand.filter(
-    card => !ids.includes(card.id)
+    card => !uniqueIds.includes(card.id)
   );
 
   /*
-   * Put cards face-down into pile.
-   */
-  room.pile.push(...selectedCards);
+    Add cards to central pile.
+  */
 
-  const isTruth =
-    selectedCards.every(
-      card => card.r === rank
-    );
+  room.pile.push(...selected);
+
+  /*
+    Save declaration.
+  */
 
   room.declaration = {
-    player: playerIndex,
-    count: selectedCards.length,
-    rank: rank,
-    actual: isTruth
+    declarer: socketId,
+    rank,
+    count: selected.length,
+
+    /*
+      Whether the cards actually match the declared rank.
+    */
+
+    actual:
+      selected.every(card => card.rank === rank)
   };
 
   room.targetRank = rank;
 
   /*
-   * Clear any previous reveal.
-   */
-  room.reveal = null;
-
-  /*
-   * Player emptied their hand.
-   */
-  if (player.hand.length === 0) {
-    room.winner = player.name;
-
-    room.phase = 'gameover';
-
-    room.message =
-      `${player.name} emptied their hand and wins!`;
-
-    sendState(room);
-
-    return;
-  }
+    The next player decides Truth or Lie.
+  */
 
   room.current =
-    nextPlayer(room, playerIndex);
+    nextIndex(
+      room,
+      playerIndex(room, socketId)
+    );
 
-  room.phase = 'challenge';
+  const challenger = currentPlayer(room);
 
   room.message =
-    `${player.name} declared ` +
-    `${selectedCards.length} × ${rank}. ` +
-    `${room.players[room.current].name}, ` +
-    `choose TRUTH or LIE.`;
+    `${challenger.name}: decide whether ${player.name}'s claim is TRUE or a LIE.`;
+
+  resetReveal(room);
 
   sendState(room);
 }
 
-function challenge(room, socketId, truth) {
-  const challengerIndex =
-    room.players.findIndex(
-      player => player.id === socketId
-    );
-
-  if (
-    challengerIndex !== room.current ||
-    room.phase !== 'challenge' ||
-    !room.declaration
-  ) {
+function resolveChallenge(room, challengerId, saysTruth) {
+  if (!room.started) {
     return;
   }
 
-  const declaration =
-    room.declaration;
+  if (room.phase !== "play") {
+    return;
+  }
 
-  const declarerIndex =
-    declaration.player;
+  if (!room.declaration) {
+    return;
+  }
 
-  const wasTruth =
-    declaration.actual;
+  const challenger = getPlayer(
+    room,
+    challengerId
+  );
 
-  /*
-   * ==========================================
-   * TRUTH
-   * ==========================================
-   *
-   * The challenger says the declaration
-   * is truthful.
-   *
-   * We reveal the cards so the UI can
-   * flip them face-up and show:
-   *
-   *             TRUTH
-   *
-   * If the declaration really was truthful,
-   * the game continues normally.
-   *
-   * If they incorrectly called TRUTH on a lie,
-   * the game still reveals LIE and resolves
-   * the pile appropriately.
-   */
-
-  if (truth) {
-    /*
-     * Reveal the cards temporarily.
-     */
-    room.reveal = {
-      result: wasTruth ? 'TRUTH' : 'LIE',
-
-      cards: room.pile.map(card => ({
-        id: card.id,
-        r: card.r,
-        s: card.s
-      })),
-
-      declarer:
-        room.players[declarerIndex].name,
-
-      challenger:
-        room.players[challengerIndex].name,
-
-      rank: declaration.rank,
-
-      count: declaration.count
-    };
-
-    /*
-     * If challenger correctly accepted truth,
-     * continue with their turn.
-     */
-    if (wasTruth) {
-      room.phase = 'play';
-
-      room.current =
-        challengerIndex;
-
-      room.message =
-        `${room.players[challengerIndex].name} ` +
-        `accepted the claim. ` +
-        `Use the same rank: ${declaration.rank}.`;
-
-      /*
-       * Keep the pile.
-       * Cards remain face-down in the game.
-       * The reveal object is only for the UI animation.
-       */
-      sendState(room);
-
-      return;
-    }
-
-    /*
-     * Challenger incorrectly said TRUTH.
-     *
-     * Since the declaration was actually a lie,
-     * the declarer takes the pile.
-     */
-    const cards =
-      room.pile.splice(0);
-
-    room.players[declarerIndex]
-      .hand
-      .push(...cards);
-
-    room.current =
-      challengerIndex;
-
-    /*
-     * Check four-of-a-kind.
-     */
-    const completedSets = [];
-
-    room.players.forEach(player => {
-      const removed =
-        checkFourOfAKind(player);
-
-      removed.forEach(rank => {
-        completedSets.push(
-          `${player.name} completed four ${rank}s`
-        );
-      });
-    });
-
-    if (
-      !room.players[
-        room.current
-      ].hand.length
-    ) {
-      room.winner =
-        room.players[
-          room.current
-        ].name;
-
-      room.phase = 'gameover';
-    } else {
-      room.phase = 'play';
-    }
-
-    room.message =
-      `LIE! ${room.players[declarerIndex].name} ` +
-      `was lying. ` +
-      `${room.players[declarerIndex].name} takes the pile; ` +
-      `${room.players[challengerIndex].name} starts.`;
-
-    if (completedSets.length) {
-      room.message +=
-        ' ' +
-        completedSets.join('. ') +
-        '.';
-    }
-
-    room.declaration = null;
-
-    room.targetRank = null;
-
-    sendState(room);
-
+  if (!challenger) {
     return;
   }
 
   /*
-   * ==========================================
-   * LIE
-   * ==========================================
-   *
-   * Challenger calls LIE.
-   *
-   * Cards are revealed.
-   *
-   * The UI receives:
-   *
-   *   result: "TRUTH"
-   *
-   * or
-   *
-   *   result: "LIE"
-   *
-   * This is what the popup uses.
-   */
+    Only the current player may challenge.
+  */
 
-  const revealedCards =
-    room.pile.map(card => ({
-      id: card.id,
-      r: card.r,
-      s: card.s
-    }));
+  if (currentPlayer(room)?.id !== challengerId) {
+    return;
+  }
+
+  const declaration = room.declaration;
+
+  const declarer = getPlayer(
+    room,
+    declaration.declarer
+  );
+
+  if (!declarer) {
+    return;
+  }
+
+  const wasTruth = declaration.actual;
+
+  /*
+    Save information for the reveal popup.
+  */
 
   room.reveal = {
-    result: wasTruth
-      ? 'TRUTH'
-      : 'LIE',
+    result: wasTruth ? "TRUTH" : "LIE",
 
-    cards: revealedCards,
+    cards: room.pile.map(card => ({
+      rank: card.rank,
+      suit: card.suit
+    })),
 
-    declarer:
-      room.players[declarerIndex].name,
+    declarer: declarer.name,
 
-    challenger:
-      room.players[challengerIndex].name,
+    challenger: challenger.name,
 
     rank: declaration.rank,
 
@@ -527,151 +467,140 @@ function challenge(room, socketId, truth) {
   };
 
   /*
-   * Remove cards from the pile.
-   */
-  const cards =
-    room.pile.splice(0);
+    If challenger says TRUTH:
+      - If it really was truth, challenger accepts it.
+      - Play continues.
+      - The next player after challenger becomes current.
+
+    If challenger says TRUTH but it was actually a lie:
+      - The challenger incorrectly accepted the lie.
+      - Play continues to the next player.
+
+    If challenger says LIE:
+      - Reveal the cards.
+      - If declarer was truthful, challenger takes pile
+        and turn returns to declarer.
+      - If declarer lied, declarer takes pile
+        and challenger becomes the next player.
+  */
+
+  if (saysTruth) {
+    room.phase = "reveal";
+
+    if (wasTruth) {
+      room.message =
+        `${declarer.name} was telling the TRUTH. ${challenger.name} accepted the claim.`;
+    } else {
+      room.message =
+        `${declarer.name} was actually LYING, but ${challenger.name} accepted the claim.`;
+    }
+
+    sendState(room);
+    return;
+  }
 
   /*
-   * ==========================================
-   * DECLARATION WAS TRUE
-   * ==========================================
-   */
+    Challenger called LIE.
+  */
+
+  room.phase = "reveal";
+
   if (wasTruth) {
-
     /*
-     * Challenger incorrectly called LIE.
-     * Challenger takes the pile.
-     */
-    room.players[challengerIndex]
-      .hand
-      .push(...cards);
+      Truth:
+      Challenger takes entire pile.
+      Turn returns to declarer.
+    */
 
-    /*
-     * Turn returns to declarer.
-     */
+    challenger.hand.push(...room.pile);
+
+    room.pile = [];
+
     room.current =
-      declarerIndex;
-  }
-
-  /*
-   * ==========================================
-   * DECLARATION WAS A LIE
-   * ==========================================
-   */
-  else {
-
-    /*
-     * Declarer lied.
-     * Declarer takes the pile.
-     */
-    room.players[declarerIndex]
-      .hand
-      .push(...cards);
-
-    /*
-     * Challenger starts.
-     */
-    room.current =
-      challengerIndex;
-  }
-
-  /*
-   * Check four-of-a-kind.
-   */
-  const completedSets = [];
-
-  room.players.forEach(player => {
-    const removed =
-      checkFourOfAKind(player);
-
-    removed.forEach(rank => {
-      completedSets.push(
-        `${player.name} completed four ${rank}s`
+      playerIndex(
+        room,
+        declarer.id
       );
-    });
-  });
-
-  /*
-   * Check winner.
-   */
-  if (
-    !room.players[
-      room.current
-    ].hand.length
-  ) {
-    room.winner =
-      room.players[
-        room.current
-      ].name;
-
-    room.phase = 'gameover';
-  } else {
-    room.phase = 'play';
-  }
-
-  /*
-   * Result message.
-   */
-  if (wasTruth) {
 
     room.message =
-      `TRUTH! ` +
-      `${room.players[declarerIndex].name} ` +
-      `was telling the truth. ` +
-      `${room.players[challengerIndex].name} ` +
-      `takes the pile; turn returns to ` +
-      `${room.players[declarerIndex].name}.`;
+      `${declarer.name} told the TRUTH. ${challenger.name} takes the pile. Turn returns to ${declarer.name}.`;
 
   } else {
+    /*
+      Lie:
+      Declarer takes entire pile.
+      Challenger becomes next player.
+    */
+
+    declarer.hand.push(...room.pile);
+
+    room.pile = [];
+
+    room.current =
+      playerIndex(
+        room,
+        challenger.id
+      );
 
     room.message =
-      `LIE! ` +
-      `${room.players[declarerIndex].name} ` +
-      `was lying. ` +
-      `${room.players[declarerIndex].name} ` +
-      `takes the pile; ` +
-      `${room.players[challengerIndex].name} ` +
-      `starts.`;
+      `${declarer.name} was LYING. ${declarer.name} takes the pile. ${challenger.name} continues.`;
   }
 
-  if (completedSets.length) {
-    room.message +=
-      ' ' +
-      completedSets.join('. ') +
-      '.';
-  }
+  /*
+    Four-of-a-kind checking happens after the pile
+    is awarded.
+  */
 
-  room.declaration = null;
+  checkFourOfKind(declarer);
+  checkFourOfKind(challenger);
 
-  room.targetRank = null;
+  checkWinner(room);
 
   sendState(room);
 }
 
-io.on('connection', socket => {
+function continueAfterReveal(room, socketId) {
+  if (!room.reveal) {
+    return;
+  }
 
   /*
-   * ==========================================
-   * CREATE ROOM
-   * ==========================================
-   */
+    Any player can close their own result screen,
+    but only the challenger/declarer involved can
+    safely continue the game.
+
+    The reveal is only visual state, so clearing it
+    doesn't alter the game state.
+  */
+
+  room.reveal = null;
+
+  if (room.phase === "reveal") {
+    if (room.winner) {
+      room.phase = "finished";
+    } else {
+      room.phase = "play";
+    }
+  }
+
+  sendState(room);
+}
+
+io.on("connection", socket => {
+  console.log(
+    "Connected:",
+    socket.id
+  );
 
   socket.on(
-    'createRoom',
+    "createRoom",
     ({ name }, callback) => {
+      name = cleanName(name);
 
-      name = String(
-        name || 'Player'
-      )
-        .trim()
-        .slice(0, 20);
-
-      const roomCode =
-        createRoomCode();
+      const code = createRoomCode();
 
       const room = {
-        code: roomCode,
+        code,
 
         host: socket.id,
 
@@ -679,7 +608,7 @@ io.on('connection', socket => {
 
         started: false,
 
-        phase: 'lobby',
+        phase: "lobby",
 
         current: 0,
 
@@ -689,87 +618,79 @@ io.on('connection', socket => {
 
         declaration: null,
 
-        /*
-         * Cards/results currently being
-         * revealed to the players.
-         */
-        reveal: null,
-
         winner: null,
 
         message:
-          'Waiting for players...'
+          "Waiting for players...",
+
+        reveal: null,
+
+        chat: []
       };
 
-      rooms.set(
-        roomCode,
-        room
-      );
+      rooms.set(code, room);
 
       room.players.push({
         id: socket.id,
+
         name,
+
         hand: [],
+
         removed: 0
       });
 
-      socket.join(roomCode);
+      socket.join(code);
 
       callback({
         ok: true,
-        code: roomCode
+        code
       });
 
       sendState(room);
     }
   );
 
-  /*
-   * ==========================================
-   * JOIN ROOM
-   * ==========================================
-   */
-
   socket.on(
-    'joinRoom',
+    "joinRoom",
     ({ code, name }, callback) => {
-
-      code = String(code || '')
+      code = String(code || "")
         .trim()
         .toUpperCase();
 
-      name = String(
-        name || 'Player'
-      )
-        .trim()
-        .slice(0, 20);
+      name = cleanName(name);
 
-      const room =
-        rooms.get(code);
+      const room = rooms.get(code);
 
       if (!room) {
-        return callback({
+        callback({
           ok: false,
-          error: 'Room not found.'
+          error: "Room not found."
         });
+
+        return;
       }
 
       if (room.started) {
-        return callback({
+        callback({
           ok: false,
           error:
-            'Game already started.'
+            "Game has already started."
         });
+
+        return;
       }
 
       if (
-        room.players.length >= 10
+        room.players.length >=
+        MAX_PLAYERS
       ) {
-        return callback({
+        callback({
           ok: false,
-          error:
-            'Room is full.'
+          error: "Room is full."
         });
+
+        return;
       }
 
       if (
@@ -779,17 +700,22 @@ io.on('connection', socket => {
             name.toLowerCase()
         )
       ) {
-        return callback({
+        callback({
           ok: false,
           error:
-            'That name is already in use.'
+            "That name is already in use."
         });
+
+        return;
       }
 
       room.players.push({
         id: socket.id,
+
         name,
+
         hand: [],
+
         removed: 0
       });
 
@@ -807,145 +733,277 @@ io.on('connection', socket => {
     }
   );
 
-  /*
-   * ==========================================
-   * START GAME
-   * ==========================================
-   */
-
   socket.on(
-    'startGame',
+    "startGame",
     ({ code }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
 
-      const room =
-        rooms.get(code);
+      if (!room) {
+        return;
+      }
+
+      if (room.host !== socket.id) {
+        sendError(
+          socket,
+          "Only the host can start the game."
+        );
+
+        return;
+      }
 
       if (
-        room &&
-        room.host === socket.id &&
-        room.players.length >= 2
+        room.players.length <
+        MIN_PLAYERS
       ) {
-        startGame(room);
+        sendError(
+          socket,
+          "At least 2 players are required."
+        );
+
+        return;
       }
+
+      startGame(room);
     }
   );
 
-  /*
-   * ==========================================
-   * THROW CARDS
-   * ==========================================
-   */
-
   socket.on(
-    'throwCards',
+    "throwCards",
     ({ code, ids, rank }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
 
-      const room =
-        rooms.get(code);
-
-      if (room) {
-        throwCards(
-          room,
-          socket.id,
-          ids,
-          rank
-        );
+      if (!room) {
+        return;
       }
+
+      throwCards(
+        room,
+        socket.id,
+        ids,
+        rank
+      );
     }
   );
 
-  /*
-   * ==========================================
-   * TRUTH / LIE
-   * ==========================================
-   */
-
   socket.on(
-    'challenge',
+    "challenge",
     ({ code, truth }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
 
-      const room =
-        rooms.get(code);
-
-      if (room) {
-        challenge(
-          room,
-          socket.id,
-          Boolean(truth)
-        );
+      if (!room) {
+        return;
       }
+
+      resolveChallenge(
+        room,
+        socket.id,
+        !!truth
+      );
+    }
+  );
+
+  socket.on(
+    "continueReveal",
+    ({ code }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
+
+      if (!room) {
+        return;
+      }
+
+      continueAfterReveal(
+        room,
+        socket.id
+      );
     }
   );
 
   /*
-   * ==========================================
-   * DISCONNECT
-   * ==========================================
-   */
+    REAL-TIME CHAT
+  */
 
   socket.on(
-    'disconnect',
+    "chat",
+    ({ code, message }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
+
+      if (!room) {
+        return;
+      }
+
+      const player = getPlayer(
+        room,
+        socket.id
+      );
+
+      if (!player) {
+        return;
+      }
+
+      message = cleanMessage(message);
+
+      if (!message) {
+        return;
+      }
+
+      const chatMessage = {
+        id:
+          Date.now().toString(36) +
+          Math.random()
+            .toString(36)
+            .slice(2, 7),
+
+        playerId: socket.id,
+
+        name: player.name,
+
+        message,
+
+        time: new Date().toISOString()
+      };
+
+      room.chat.push(chatMessage);
+
+      /*
+        Keep only the latest 100 messages.
+      */
+
+      if (room.chat.length > 100) {
+        room.chat.shift();
+      }
+
+      io.to(room.code).emit(
+        "chatMessage",
+        chatMessage
+      );
+    }
+  );
+
+  /*
+    Request current chat history.
+  */
+
+  socket.on(
+    "requestChat",
+    ({ code }) => {
+      const room = rooms.get(
+        String(code || "")
+          .trim()
+          .toUpperCase()
+      );
+
+      if (!room) {
+        return;
+      }
+
+      if (
+        !room.players.some(
+          player =>
+            player.id === socket.id
+        )
+      ) {
+        return;
+      }
+
+      socket.emit(
+        "chatHistory",
+        room.chat
+      );
+    }
+  );
+
+  /*
+    Disconnect handling.
+  */
+
+  socket.on(
+    "disconnect",
     () => {
+      console.log(
+        "Disconnected:",
+        socket.id
+      );
 
       for (
-        const [roomCode, room]
-        of rooms
+        const [code, room] of rooms
       ) {
-
-        const playerIndex =
+        const index =
           room.players.findIndex(
             player =>
               player.id === socket.id
           );
 
-        if (playerIndex < 0) {
+        if (index < 0) {
           continue;
         }
 
-        const playerName =
-          room.players[
-            playerIndex
-          ].name;
+        const leavingPlayer =
+          room.players[index];
 
-        const wasCurrentPlayer =
-          playerIndex === room.current;
+        const wasCurrent =
+          index === room.current;
+
+        const wasHost =
+          room.host === socket.id;
 
         room.players.splice(
-          playerIndex,
+          index,
           1
         );
 
         /*
-         * Delete empty room.
-         */
+          If everyone left, delete room.
+        */
+
         if (
           room.players.length === 0
         ) {
-          rooms.delete(roomCode);
+          rooms.delete(code);
           continue;
         }
 
         /*
-         * Give host role to next player.
-         */
-        if (
-          room.host === socket.id
-        ) {
+          Transfer host.
+        */
+
+        if (wasHost) {
           room.host =
             room.players[0].id;
         }
 
         /*
-         * Not enough players.
-         */
+          If game has started and
+          fewer than two players remain,
+          return to lobby.
+        */
+
         if (
           room.started &&
           room.players.length < 2
         ) {
-
           room.started = false;
 
-          room.phase = 'lobby';
+          room.phase = "lobby";
 
           room.pile = [];
 
@@ -956,34 +1014,36 @@ io.on('connection', socket => {
           room.reveal = null;
 
           room.winner = null;
-        }
 
-        /*
-         * Current player disconnected.
-         */
-        else if (
+          room.players.forEach(
+            player => {
+              player.hand = [];
+              player.removed = 0;
+            }
+          );
+        } else if (
           room.started &&
-          wasCurrentPlayer
+          wasCurrent
         ) {
+          /*
+            Keep current index valid.
+          */
 
-          room.current =
-            playerIndex %
-            room.players.length;
-        }
-
-        /*
-         * Player before current player left.
-         */
-        else if (
+          if (
+            room.current >=
+            room.players.length
+          ) {
+            room.current = 0;
+          }
+        } else if (
           room.started &&
-          playerIndex < room.current
+          index < room.current
         ) {
-
           room.current--;
         }
 
         room.message =
-          `${playerName} left the room.`;
+          `${leavingPlayer.name} left the room.`;
 
         sendState(room);
       }
@@ -991,20 +1051,12 @@ io.on('connection', socket => {
   );
 });
 
-/*
- * ==========================================
- * START SERVER
- * ==========================================
- */
-
 server.listen(
   PORT,
-  '0.0.0.0',
+  "0.0.0.0",
   () => {
-
     console.log(
-      `Bakakay server running on ` +
-      `0.0.0.0:${PORT}`
+      `Bakakay server running on 0.0.0.0:${PORT}`
     );
   }
 );
