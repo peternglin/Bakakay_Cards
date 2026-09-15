@@ -288,7 +288,10 @@ function throwCards(room, socketId, cardIds, rank) {
   }
 
   if (currentPlayer(room)?.id !== socketId) {
-    sendError(socketId, "It is not your turn.");
+    sendError(
+  io.sockets.sockets.get(socketId),
+  "It is not your turn."
+);
     return;
   }
 
