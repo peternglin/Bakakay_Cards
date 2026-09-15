@@ -2648,7 +2648,8 @@ function renderControls(){
     state.phase ===
     "play" &&
     state.currentPlayerId ===
-    state.myId
+    state.myId &&
+    !state.awaitingDecision
   ){
 
     const play =
@@ -2772,7 +2773,9 @@ function openDeclaration(){
   }
 
   const options =
-    RANKS();
+    state.targetRank
+      ? [state.targetRank]
+      : RANKS();
 
   modal.innerHTML =
     `
@@ -2793,7 +2796,9 @@ function openDeclaration(){
       </p>
 
       <p>
-        What rank are you claiming?
+        ${state.targetRank
+          ? `The round is locked to <strong>${escapeHTML(state.targetRank)}</strong>. You must declare the same rank.`
+          : "What rank are you claiming?"}
       </p>
 
       <div
@@ -3600,6 +3605,7 @@ renderControls = function(){
   if(
     state.phase === "play" &&
     state.currentPlayerId === state.myId &&
+    state.awaitingDecision &&
     state.declaration &&
     state.declaration.declarer !== state.myId
   ){
