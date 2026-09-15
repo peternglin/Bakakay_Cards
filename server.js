@@ -143,6 +143,8 @@ function buildPublicState(room, socketId) {
 
     reveal: room.reveal,
 
+    awaitingDecision: room.awaitingDecision,
+
     players: room.players.map((p, index) => ({
       id: p.id,
       name: p.name,
@@ -191,6 +193,7 @@ function startGame(room) {
   room.declaration = null;
   room.targetRank = null;
   room.reveal = null;
+  room.awaitingDecision = false;
 
   room.players.forEach(player => {
     player.hand = [];
@@ -281,6 +284,14 @@ function throwCards(room, socketId, cardIds, rank) {
     return;
   }
 
+  if (room.awaitingDecision) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      "Choose TRUTH or LIE before playing a card."
+    );
+    return;
+  }
+
   const player = getPlayer(room, socketId);
 
   if (!player) {
@@ -315,6 +326,14 @@ function throwCards(room, socketId, cardIds, rank) {
   }
 
   rank = String(rank || "").trim();
+
+  if (room.targetRank && rank !== room.targetRank) {
+    sendError(
+      io.sockets.sockets.get(socketId),
+      `You must declare ${room.targetRank} until someone calls LIE.`
+    );
+    return;
+  }
 
   if (!RANKS.includes(rank)) {
     sendError(
@@ -401,162 +420,91 @@ function throwCards(room, socketId, cardIds, rank) {
     `${challenger.name}: decide whether ${player.name}'s claim is TRUE or a LIE.`;
 
   resetReveal(room);
+  room.awaitingDecision = true;
 
   sendState(room);
 }
 
 function resolveChallenge(room, challengerId, saysTruth) {
-  if (!room.started) {
+  if (!room.started || room.phase !== "play" || !room.declaration) {
     return;
   }
 
-  if (room.phase !== "play") {
+  const challenger = getPlayer(room, challengerId);
+  if (!challenger || currentPlayer(room)?.id !== challengerId) {
     return;
   }
 
-  if (!room.declaration) {
-    return;
-  }
-
-  const challenger = getPlayer(
-    room,
-    challengerId
-  );
-
-  if (!challenger) {
-    return;
-  }
-
-  /*
-    Only the current player may challenge.
-  */
-
-  if (currentPlayer(room)?.id !== challengerId) {
+  if (!room.awaitingDecision) {
     return;
   }
 
   const declaration = room.declaration;
-
-  const declarer = getPlayer(
-    room,
-    declaration.declarer
-  );
-
+  const declarer = getPlayer(room, declaration.declarer);
   if (!declarer) {
     return;
   }
 
-  const wasTruth = declaration.actual;
-
   /*
-    Save information for the reveal popup.
+    TRUTH means the challenger accepts the declaration and
+    continues the round. Nothing is revealed. The challenger
+    immediately gets the turn and MUST keep the same rank.
   */
-
-  room.reveal = {
-    result: wasTruth ? "TRUTH" : "LIE",
-
-    cards: room.pile.map(card => ({
-      rank: card.rank,
-      suit: card.suit
-    })),
-
-    declarer: declarer.name,
-
-    challenger: challenger.name,
-
-    rank: declaration.rank,
-
-    count: declaration.count
-  };
-
-  /*
-    If challenger says TRUTH:
-      - If it really was truth, challenger accepts it.
-      - Play continues.
-      - The next player after challenger becomes current.
-
-    If challenger says TRUTH but it was actually a lie:
-      - The challenger incorrectly accepted the lie.
-      - Play continues to the next player.
-
-    If challenger says LIE:
-      - Reveal the cards.
-      - If declarer was truthful, challenger takes pile
-        and turn returns to declarer.
-      - If declarer lied, declarer takes pile
-        and challenger becomes the next player.
-  */
-
   if (saysTruth) {
-    room.phase = "reveal";
-
-    if (wasTruth) {
-      room.message =
-        `${declarer.name} was telling the TRUTH. ${challenger.name} accepted the claim.`;
-    } else {
-      room.message =
-        `${declarer.name} was actually LYING, but ${challenger.name} accepted the claim.`;
-    }
+    room.awaitingDecision = false;
+    room.reveal = null;
+    room.targetRank = declaration.rank;
+    room.current = challenger === declarer
+      ? room.current
+      : playerIndex(room, challenger.id);
+    room.message =
+      `${challenger.name} accepted the claim as TRUTH. Play ${declaration.rank}s and continue the round.`;
 
     sendState(room);
     return;
   }
 
   /*
-    Challenger called LIE.
+    LIE is the only action that reveals the most recent
+    declaration. The cards are shown before the result is
+    applied to the pile/turn state.
   */
+  const wasTruth = declaration.actual;
+
+  const revealedCards = room.pile.map(card => ({
+    rank: card.rank,
+    suit: card.suit
+  }));
+
+  room.reveal = {
+    result: wasTruth ? "TRUTH" : "LIE",
+    cards: revealedCards,
+    declarer: declarer.name,
+    challenger: challenger.name,
+    rank: declaration.rank,
+    count: declaration.count
+  };
 
   room.phase = "reveal";
 
   if (wasTruth) {
-    /*
-      Truth:
-      Challenger takes entire pile.
-      Turn returns to declarer.
-    */
-
     challenger.hand.push(...room.pile);
-
     room.pile = [];
-
-    room.current =
-      playerIndex(
-        room,
-        declarer.id
-      );
-
+    room.current = playerIndex(room, declarer.id);
     room.message =
       `${declarer.name} told the TRUTH. ${challenger.name} takes the pile. Turn returns to ${declarer.name}.`;
-
   } else {
-    /*
-      Lie:
-      Declarer takes entire pile.
-      Challenger becomes next player.
-    */
-
     declarer.hand.push(...room.pile);
-
     room.pile = [];
-
-    room.current =
-      playerIndex(
-        room,
-        challenger.id
-      );
-
+    room.current = playerIndex(room, challenger.id);
     room.message =
       `${declarer.name} was LYING. ${declarer.name} takes the pile. ${challenger.name} continues.`;
   }
 
-  /*
-    Four-of-a-kind checking happens after the pile
-    is awarded.
-  */
+  room.awaitingDecision = false;
 
   checkFourOfKind(declarer);
   checkFourOfKind(challenger);
-
   checkWinner(room);
 
   sendState(room);
@@ -577,6 +525,7 @@ function continueAfterReveal(room, socketId) {
   */
 
   room.reveal = null;
+  room.awaitingDecision = false;
 
   if (room.phase === "reveal") {
     if (room.winner) {
@@ -627,6 +576,8 @@ io.on("connection", socket => {
           "Waiting for players...",
 
         reveal: null,
+
+        awaitingDecision: false,
 
         chat: []
       };
